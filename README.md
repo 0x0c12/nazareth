@@ -1,2 +1,2 @@
-simple discord bot made using twillight-rs
-mostly using this to learn rust lol
+simple discord bot
+was gonna be made using twilight-rs but i actually cannot rust
