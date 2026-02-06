@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+twilight-cache-inmemory = "0.16.0"
+twilight-command-parser = "0.9.0"
+twilight-embed-builder = "0.11.1"
+twilight-gateway = "0.16.0"
+twilight-gateway-queue = "0.16.0"
+twilight-http = "0.16.0"
+twilight-http-ratelimiting = "0.16.0"
+twilight-lavalink = "0.15.3"
