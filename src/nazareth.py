@@ -1,22 +1,48 @@
 import os
-from discord.ext import commands
-from config import token, prefix
-import threading
 import asyncio
-
-
+import threading
 import discord
+from discord.ext import commands
+import config
+from cogs.nz_sticky_db import NzStickyDb
+from nz_database import NzDatabase
+
 intents = discord.Intents.default()
 intents.message_content = True
-nz = commands.Bot(command_prefix=prefix, intents=intents)
 
-async def load_all_extensions():
-    for folder in ["cogs", "events"]:
-        folder_path = os.path.join(os.path.dirname(__file__), folder)
-        if os.path.exists(folder_path):
-            for filename in os.listdir(folder_path):
-                if filename.endswith(".py"):
-                    await nz.load_extension(f"{folder}.{filename[:-3]}")
+
+class Nazareth(commands.Bot):
+    def __init__(self):
+        super().__init__(
+            command_prefix=config.prefix,
+            intents=intents
+        )
+        self.db=None
+        self.sticky_db=None
+
+    async def setup_hook(self):
+        self.db = NzDatabase("nazareth.db")
+        await self.db.init_tables()
+        self.sticky_db = NzStickyDb("nazareth.db")
+        # await self.db.init_db()
+        folders = [config.cog_folder, config.event_folder]
+
+        for folder in folders:
+            for file in os.listdir(folder):
+                if file.endswith(".py") and not file.startswith("_"):
+                    ext = f"{folder}.{file[:-3]}"
+                    try:
+                        await self.load_extension(ext)
+                        print(f"Loaded {ext}")
+                    except Exception as e:
+                        print(f"Failed to load {ext}: {e}")
+
+    async def on_ready(self):
+        print(f"Logged in as {self.user}")
+
+
+nz = Nazareth()
+
 
 def shutdown_handler():
     while True:
@@ -27,13 +53,9 @@ def shutdown_handler():
                 print("Shutting down...")
                 asyncio.run_coroutine_threadsafe(nz.close(), nz.loop)
                 break
-                
+
+
 threading.Thread(target=shutdown_handler, daemon=True).start()
 
-@nz.event
-async def on_ready():
-    print(f"Logged in as {nz.user}")
-
-def nz_start():
-    asyncio.run(load_all_extensions())
-    nz.run(token)
+if __name__ == "__main__":
+    nz.run(config.token)
