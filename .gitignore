@@ -7,8 +7,6 @@ __pycache__/
 env/
 *.egg-info/
 
-easter_eggs.py
-
 token.txt
 osu_secrets.txt
 
