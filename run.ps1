@@ -1,5 +1,12 @@
 $root = "C:\dev\nazareth"
+$env = "env"
 
-$token = (Get-Content (Join-Path $root "token.txt") -Raw).TrimEnd("`r", "`n")
+if (Test-Path -Path (Join-Path $root $env))
+{
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+    . (Join-Path $root "env\Scripts\Activate.ps1")
+}
 
-python (Join-Path $root "src\main.py") "$token"
+Push-Location (Join-Path $root "src")
+python (Join-Path $root "src/nazareth.py")
+Pop-Location
