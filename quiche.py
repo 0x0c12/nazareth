@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import shutil
 import subprocess
+import time
 import re
 
 from config import QUICHE_DOCKER_IMAGE, QUICHE_TIMEOUT
@@ -59,7 +60,7 @@ class NzQuiche(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.running_session = asyncio.Lock()
-        self.requirements_path = Path(tempfile.gettempdir()) / "quiche_requirements"
+        self.venv_path = Path(tempfile.gettempdir()) / "quiche_venv"
 
     async def cog_check(self, ctx):
         if not ctx.guild:
@@ -115,9 +116,9 @@ class NzQuiche(commands.Cog):
             await ctx.send("```File must be a .txt requirements file```")
             return
 
-        self.requirements_path.mkdir(parents=True, exist_ok=True)
-        await attach.save(self.requirements_path / "requirements.txt")
-        await ctx.send("```Saved requirements.txt persistently```")
+        self.venv_path.mkdir(parents=True, exist_ok=True)
+        await attach.save(self.venv_path / "requirements.txt")
+        await ctx.send(f"```Saved requirements.txt persistently```")
 
     @quiche.command(name="python")
     async def run_python(self, ctx, *, main_file: str = None):
@@ -130,6 +131,9 @@ class NzQuiche(commands.Cog):
             session = SessionManager(QUICHE_DOCKER_IMAGE)
 
             try:
+                # -----------------------------------
+                # Collect attachments (current first)
+                # -----------------------------------
                 attachments = list(ctx.message.attachments)
 
                 if ctx.message.reference:
@@ -139,16 +143,21 @@ class NzQuiche(commands.Cog):
                     except Exception:
                         pass
 
+                # Duplicate filename check
                 filenames = [a.filename for a in attachments]
                 if len(filenames) != len(set(filenames)):
                     await ctx.send("```Error: Two files with the same name cannot be parsed.```")
                     return
 
+                # Save files
                 for attach in attachments:
                     await attach.save(temp_dir / attach.filename)
 
                 py_files = [f for f in temp_dir.iterdir() if f.suffix == ".py"]
 
+                # -----------------------------------
+                # Code block support
+                # -----------------------------------
                 code_match = re.search(
                     r"```(?:py|python)?\n(.*?)```",
                     ctx.message.content,
@@ -162,33 +171,93 @@ class NzQuiche(commands.Cog):
                     main_path.write_text(code_content)
                     code_block_used = True
 
+                # -----------------------------------
+                # Resolution rules
+                # -----------------------------------
                 if code_block_used:
                     selected_file = "main.py"
+
                 else:
                     if attachments and not py_files:
-                        await ctx.send("```Error: Files supplied but no Python file found.```")
-                        return
+                        if not code_match:
+                            await ctx.send("```Error: Files supplied but no Python file found.```")
+                            return
 
                     if len(py_files) == 1 and not main_file:
                         selected_file = py_files[0].name
+
                     elif len(py_files) > 1 and not main_file:
                         file_list = "\n".join(f.name for f in py_files)
                         await ctx.send(f"```Multiple Python files found:\n{file_list}\nSpecify which to run.```")
                         return
+
                     elif main_file:
                         if not (temp_dir / main_file).exists():
                             await ctx.send(f"```Main file `{main_file}` not found.```")
                             return
                         selected_file = main_file
+
                     else:
                         await ctx.send("```Error: No Python file supplied.```")
                         return
 
+                # -----------------------------------
+                # Start container
+                # -----------------------------------
                 container_id = await session.start_session(temp_dir)
 
-                # Install requirements if saved
-                req_file = self.requirements_path / "requirements.txt"
+                # -----------------------------------
+                # Setup venv
+                # -----------------------------------
+                
+                # -----------------------------------
+                # Create virtual environment
+                # -----------------------------------
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_id,
+                    "python", "-m", "venv", "/home/quiche/venv",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                out, err = await proc.communicate()
+                if proc.returncode != 0:
+                    await ctx.send(f"```Venv creation failed:\n{err.decode()}```")
+                    return
+                
+                # -----------------------------------
+                # Bootstrap pip (Python 3.12 safe)
+                # -----------------------------------
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_id,
+                    "/home/quiche/venv/bin/python",
+                    "-m", "ensurepip", "--upgrade",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                out, err = await proc.communicate()
+                if proc.returncode != 0:
+                    await ctx.send(f"```ensurepip failed:\n{err.decode()}```")
+                    return
+                
+                # -----------------------------------
+                # Upgrade pip (optional but safer)
+                # -----------------------------------
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_id,
+                    "/home/quiche/venv/bin/python",
+                    "-m", "pip", "install", "--upgrade", "pip",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                await proc.communicate()
+                
+                # -----------------------------------
+                # Install requirements (if exists)
+                # -----------------------------------
+                req_file = self.venv_path / "requirements.txt"
                 if req_file.exists():
+                
+                    # Copy requirements into container
                     proc = await asyncio.create_subprocess_exec(
                         "docker", "cp",
                         str(req_file),
@@ -200,44 +269,26 @@ class NzQuiche(commands.Cog):
                     if proc.returncode != 0:
                         await ctx.send(f"```Copy requirements failed:\n{err.decode()}```")
                         return
-
+                
+                    # Install requirements using python -m pip
                     proc = await asyncio.create_subprocess_exec(
                         "docker", "exec", container_id,
-                        "python", "-m", "pip",
-                        "install", "-r", "/home/quiche/requirements.txt",
+                        "/home/quiche/venv/bin/python",
+                        "-m", "pip",
+                        "install",
+                        "-r", "/home/quiche/requirements.txt",
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE
                     )
                     out, err = await proc.communicate()
                     if proc.returncode != 0:
                         await ctx.send(f"```Requirements install failed:\n{err.decode()}```")
-                        return
+                        return                
 
-                proc = await asyncio.create_subprocess_exec(
-                    "docker", "exec", "-i", container_id,
-                    "python", selected_file,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-
-                async def stream(pipe, prefix=""):
-                    buffer = ""
-                    while True:
-                        line = await pipe.readline()
-                        if not line:
-                            break
-                        buffer += prefix + line.decode()
-                        if len(buffer) > 1800:
-                            await ctx.send(f"```{buffer}```")
-                            buffer = ""
-                    if buffer:
-                        await ctx.send(f"```{buffer}```")
+                def check(m):
+                    return m.author == ctx.author and m.channel == ctx.channel
 
                 async def input_loop():
-                    def check(m):
-                        return m.author == ctx.author and m.channel == ctx.channel
-
                     while True:
                         try:
                             msg = await self.bot.wait_for("message", check=check, timeout=QUICHE_TIMEOUT)
@@ -253,6 +304,19 @@ class NzQuiche(commands.Cog):
                             await proc.stdin.drain()
                         except Exception:
                             break
+
+                async def stream(pipe, prefix=""):
+                    buffer = ""
+                    while True:
+                        line = await pipe.readline()
+                        if not line:
+                            break
+                        buffer += prefix + line.decode()
+                        if len(buffer) > 1800:
+                            await ctx.send(f"```{buffer}```")
+                            buffer = ""
+                    if buffer:
+                        await ctx.send(f"```{buffer}```")
 
                 input_task = asyncio.create_task(input_loop())
                 stdout_task = asyncio.create_task(stream(proc.stdout))
