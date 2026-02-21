@@ -56,6 +56,13 @@ class NzDatabase:
                 )
             """)
             await db.commit()
+            # Quiche access
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS QuicheAccess (
+                    guild_id INTEGER PRIMARY KEY,
+                    role_id INTEGER
+                )
+            """)
 
     # ===== Verification methods =====
     async def set_verified_role(self, guild_id: int, role_id: int):
@@ -178,3 +185,19 @@ class NzDatabase:
                 row[0]: {"content": row[1], "message_id": row[2], "last_msg_id": None}
                 for row in rows
             }
+    # ===== Quiche Access Methods =====
+    async def set_quiche_role(self, guild_id: int, role_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT INTO QuicheAccess (guild_id, role_id) VALUES(?, ?) ON CONFLICT(guild_id) DO UPDATE SET role_id=excluded.role_id",
+                (guild_id, role_id)
+            )
+            await db.commit()
+
+    async def get_quiche_role(self, guild_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "SELECT role_id FROM QuicheAccess WHERE guild_id=?", (guild_id,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None

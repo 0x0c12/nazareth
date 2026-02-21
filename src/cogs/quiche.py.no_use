@@ -1,0 +1,158 @@
+import discord
+from discord.ext import commands
+import asyncio
+from pathlib import Path
+import tempfile
+import shutil
+import os
+import asyncio.subprocess as subprocess
+
+class NzQuiche(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.running_session = asyncio.Lock()
+        self.venv_path = Path(tempfile.gettempdir()) / "quiche_venv"
+
+    async def cog_check(self, ctx):
+        if not ctx.guild:
+            await ctx.send("```Commands can only be executed in servers.```")
+            return False
+        
+        if ctx.command.name == "set_role":
+            return True
+        
+        try:
+            quiche_role_id = await self.bot.db.get_quiche_role(ctx.guild.id)
+            if not quiche_role_id:
+                await ctx.send(
+                    "```No role set for quiche, please set a role with ~quiche set_role <@&role_id>```"
+                )
+                return False
+            role = ctx.guild.get_role(quiche_role_id)
+            if role is None:
+                await ctx.send("```Configured quiche role no longer exists, please set it again```")
+                return False
+            if role not in ctx.author.roles:
+                await ctx.send("```You don't have the permission to use this command.```")
+                return False
+        except Exception as e:
+            await ctx.send(f"```Error checking permissions: {e}```")
+            return False
+        return True
+
+    @commands.group(name="quiche", invoke_without_command=True)
+    @commands.check(lambda ctx: True)
+    async def quiche(self, ctx):
+        await ctx.send(
+            "```Subcommands:\n"
+            "set_role <@&role_id>\n"
+            "requirements <requirements.txt>\n"
+            "python <main_file.py>```"
+        )
+
+    @commands.has_permissions(manage_roles=True)
+    @quiche.command(name="set_role")
+    async def set_role(self, ctx, role: discord.Role = None):
+        if role is None:
+            await ctx.send("```Usage: ~quiche set_role <@&role_id>```")
+            return
+        try:
+            await self.bot.db.set_quiche_role(ctx.guild.id, role.id)
+            await ctx.send(f"```Quiche role successfully set to {role}```")
+        except Exception as e:
+            await ctx.send(f"```Error setting role: {e}```")
+
+    @quiche.command(name="requirements")
+    async def requirements(self, ctx):
+        if not ctx.message.attachments:
+            await ctx.send("```Attach a requirements.txt file```")
+            return
+        attach = ctx.message.attachments[0]
+        if not attach.filename.lower().endswith(".txt"):
+            await ctx.send("```File must be a .txt requirements file```")
+            return
+        try:
+            self.venv_path.mkdir(parents=True, exist_ok=True)
+            await attach.save(self.venv_path / "requirements.txt")
+            await ctx.send(f"```Saved requirements.txt to persistent venv at {self.venv_path}```")
+        except Exception as e:
+            await ctx.send(f"```Error saving requirements: {e}```")
+
+    
+    @quiche.command(name="python")
+    async def run_python(self, ctx, *, main_file: str):
+        if self.running_session.locked():
+            await ctx.send("```Another Python session is running. Please wait.```")
+            return
+    
+        async with self.running_session:
+            temp_dir = Path(tempfile.gettempdir()) / f"quiche_tmp_{ctx.author.id}"
+            temp_dir.mkdir(exist_ok=True)
+    
+            try:
+                # Save script attachments
+                for attach in ctx.message.attachments:
+                    await attach.save(temp_dir / attach.filename)
+    
+                main_file_path = temp_dir / main_file
+                if not main_file_path.exists():
+                    await ctx.send(f"```Main file `{main_file}` not found in attachments```")
+                    return
+    
+                # Persistent venv
+                py_exec = self.venv_path / "Scripts/python.exe" if os.name == "nt" else self.venv_path / "bin/python"
+                if not py_exec.exists():
+                    await ctx.send("```Creating persistent virtual environment...```")
+                    proc = await subprocess.create_subprocess_exec(
+                        "python", "-m", "venv", str(self.venv_path),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+                    out, err = await proc.communicate()
+                    if proc.returncode != 0:
+                        await ctx.send(f"```Error creating venv:\n{err.decode()}```")
+                        return
+    
+                # Install requirements from persistent venv
+                venv_req_file = self.venv_path / "requirements.txt"
+                if venv_req_file.exists():
+                    await ctx.send("```Installing requirements from persistent venv...```")
+                    proc = await subprocess.create_subprocess_exec(
+                        str(py_exec), "-m", "pip", "install", "-r", str(venv_req_file),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+                    out, err = await proc.communicate()
+                    if proc.returncode != 0:
+                        await ctx.send(f"```Error installing requirements:\n{err.decode()}```")
+                        return
+    
+                await ctx.send(f"```Running {main_file}```")
+    
+                # Launch Python process asynchronously
+                proc = await subprocess.create_subprocess_exec(
+                    str(py_exec), str(main_file_path),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=temp_dir
+                )
+    
+                # Wait for process to finish
+                out, err = await proc.communicate()
+                stdout_text = out.decode()
+                stderr_text = err.decode()
+    
+                output = f"STDOUT:\n{stdout_text}\nSTDERR:\n{stderr_text}"
+                if len(output) > 1900:
+                    output = output[:1900] + "\n...[truncated]"
+    
+                await ctx.send(f"```{output}```")
+
+            except Exception as e:
+                await ctx.send(f"```Error executing Python: {e}```")
+            finally:
+                # Clean temporary files
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir)
+
+async def setup(bot):
+    await bot.add_cog(NzQuiche(bot))
