@@ -8,7 +8,7 @@ import subprocess
 import re
 import time
 
-from config import QUICHE_DOCKER_IMAGE, QUICHE_TIMEOUT, MAX_MESSAGES
+from config import QUICHE_DOCKER_IMAGE, QUICHE_TIMEOUT, MAX_MESSAGES, USER_WHITELIST
 
 
 class SessionManager:
@@ -50,7 +50,7 @@ class SessionManager:
 
 
 class NzQuiche(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot, whitelist):
         self.bot = bot
         self.max_sessions = 3
         self.active_sem = asyncio.Semaphore(self.max_sessions)
@@ -59,6 +59,7 @@ class NzQuiche(commands.Cog):
         self.sessions = {}                  # user_id -> SessionManager
         self.session_tasks = {}             # user_id -> asyncio.Task
         self.stop_events = {}               # user_id -> asyncio.Event()
+        self.whitelist = whitelist or []
 
         # cooldown & spam prevention
         self.user_request_counts = {}       # user_id -> (count, last_time)
@@ -145,7 +146,11 @@ class NzQuiche(commands.Cog):
                 return
 
             for attach in attachments:
-                await attach.save(temp_dir / attach.filename)
+                file_path = temp_dir / attach.filename
+                await attach.save(file_path)
+
+                if ctx.author.id in self.whitelist:
+                    file_path.chmod(0o755)
 
             # code block
             code_match = re.search(r"```(?:py|python)?\n(.*?)```", ctx.message.content, re.DOTALL)
@@ -272,7 +277,6 @@ class NzQuiche(commands.Cog):
     async def quiche(self, ctx):
         await ctx.send(
             "```Subcommands:\n"
-            "set_role <@&role_id>\n"
             "requirements <requirements.txt>\n"
             "run <main_file.py>\n"
             "queue\n"
@@ -363,4 +367,5 @@ class NzQuiche(commands.Cog):
         await ctx.send("```All sessions and queued users have been terminated.```")
 
 async def setup(bot):
-    await bot.add_cog(NzQuiche(bot))
+    whitelist = USER_WHITELIST
+    await bot.add_cog(NzQuiche(bot, whitelist))
