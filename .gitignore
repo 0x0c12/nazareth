@@ -12,3 +12,5 @@ osu_secrets.txt
 
 .log
 *.db
+*.bak
+*.no_use
