@@ -6,7 +6,6 @@ import tempfile
 import shutil
 import subprocess
 import re
-import time
 
 from config import QUICHE_DOCKER_IMAGE, QUICHE_TIMEOUT
 
@@ -61,15 +60,8 @@ class NzQuiche(commands.Cog):
         self.queued_users = set()
         self.sessions = {}
         self.requirements_path = Path(tempfile.gettempdir()) / "quiche_requirements"
-
-        # cooldown & spam prevention
-        self.user_request_counts = {}  # user_id -> (count, last_time)
-        self.max_queue_requests = 5
-        self.cooldown_seconds = 300  # 5 minutes
-
         self.queue_loop_task = asyncio.create_task(self.queue_loop())
 
-    # ---- Queue Loop ----
     async def queue_loop(self):
         while True:
             user_id, ctx, main_file = await self.session_queue.get()
@@ -81,30 +73,15 @@ class NzQuiche(commands.Cog):
                 self.queued_users.discard(user_id)
                 self.session_queue.task_done()
 
-    # ---- Enqueue ----
     async def enqueue_python(self, ctx, main_file):
         user_id = ctx.author.id
-        now = time.time()
-
-        count, last_time = self.user_request_counts.get(user_id, (0, now))
-        if now - last_time > self.cooldown_seconds:
-            count = 0  # reset count after cooldown
-        count += 1
-        self.user_request_counts[user_id] = (count, now)
-
-        if count > self.max_queue_requests:
-            await ctx.send("```You have been temporarily rate-limited for spamming the queue. Wait 5 minutes.```")
-            return
-
         if user_id in self.queued_users:
             await ctx.send("```You already have a queued session. Wait for it to start.```")
             return
-
         self.queued_users.add(user_id)
         await self.session_queue.put((user_id, ctx, main_file))
-        await ctx.send(f"```Your Python session has been queued. Position: {len(self.session_queue._queue)}```")
+        await ctx.send(f"```Your Python session has been queued. Position: {self.session_queue.qsize()}```")
 
-    # ---- Python Session Runner ----
     async def _run_python_session(self, ctx, main_file=None):
         async with self.active_sem:
             temp_dir = Path(tempfile.mkdtemp(prefix=f"quiche_{ctx.author.id}_"))
@@ -186,7 +163,7 @@ class NzQuiche(commands.Cog):
                         await ctx.send(f"```Requirements install failed:\n{err.decode()}```")
                         return
 
-                # ---- run code with chunked I/O ----
+                # run code with chunk-based input/output
                 proc = await asyncio.create_subprocess_exec(
                     "docker", "exec", "-i", container_id,
                     "python", selected_file,
@@ -198,14 +175,14 @@ class NzQuiche(commands.Cog):
                 async def stream(pipe, prefix=""):
                     buffer = b""
                     while True:
-                        chunk = await pipe.read(256)
+                        chunk = await pipe.read(256)  # read small chunks
                         if not chunk:
                             break
                         buffer += chunk
-                        # flush if newline, prompt, or large buffer
                         if b"\n" in buffer or buffer.endswith(b": ") or len(buffer) > 1800:
                             await ctx.send(f"```{prefix}{buffer.decode(errors='replace')}```")
                             buffer = b""
+
                     if buffer:
                         await ctx.send(f"```{prefix}{buffer.decode(errors='replace')}```")
 
@@ -218,9 +195,19 @@ class NzQuiche(commands.Cog):
                             msg = await self.bot.wait_for("message", check=check, timeout=QUICHE_TIMEOUT)
                         except asyncio.TimeoutError:
                             break
-                        if msg.content.strip() == "~quiche exit" or msg.content.strip() == "~queue exit":
-                            proc.kill()
+                        if msg.content.strip() == "~quiche exit":
+                            if ctx.author.id in self.queued_users:
+                                self.queued_users.discard(ctx.author.id)
+                                self.session_queue._queue = [
+                                    item for item in self.session_queue._queue if item[0] != ctx.author.id
+                                ]
+                                await ctx.send("```You have been removed from the queue.```")
+                            
+                            if ctx.author.id in self.sessions:
+                                proc.kill()
+                                await ctx.send("```Your session has been terminated.```")
                             break
+
                         try:
                             proc.stdin.write((msg.content + "\n").encode())
                             await proc.stdin.drain()
@@ -247,15 +234,13 @@ class NzQuiche(commands.Cog):
                     shutil.rmtree(temp_dir)
                 self.sessions.pop(ctx.author.id, None)
 
-    # ---- Command Group ----
     @commands.group(name="quiche", invoke_without_command=True)
     async def quiche(self, ctx):
         await ctx.send(
             "```Subcommands:\n"
             "set_role <@&role_id>\n"
             "requirements <requirements.txt>\n"
-            "run <main_file.py>\n"
-            "queue```"
+            "python <main_file.py>```"
         )
 
     @commands.has_permissions(manage_roles=True)
@@ -280,25 +265,9 @@ class NzQuiche(commands.Cog):
         await attach.save(self.requirements_path / "requirements.txt")
         await ctx.send("```Saved requirements.txt persistently```")
 
-    @quiche.command(name="run")
+    @quiche.command(name="python")
     async def run_python(self, ctx, *, main_file: str = None):
         await self.enqueue_python(ctx, main_file)
-
-    @quiche.command(name="queue")
-    async def show_queue(self, ctx):
-        queued_users_info = []
-        for uid, _, _ in list(self.session_queue._queue):
-            user = ctx.guild.get_member(uid)
-            if user:
-                queued_users_info.append(user.name)
-        active_users_info = [ctx.guild.get_member(uid).name for uid in self.sessions.keys() if ctx.guild.get_member(uid)]
-        
-        msg = "```Active sessions:\n"
-        msg += "\n".join(active_users_info) if active_users_info else "None"
-        msg += "\n\nQueued sessions:\n"
-        msg += "\n".join(queued_users_info) if queued_users_info else "None"
-        msg += "```"
-        await ctx.send(msg)
 
 
 async def setup(bot):
