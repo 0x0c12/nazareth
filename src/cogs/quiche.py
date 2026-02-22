@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands
 import asyncio
@@ -9,7 +8,7 @@ import subprocess
 import re
 import time
 
-from config import QUICHE_DOCKER_IMAGE, QUICHE_TIMEOUT
+from config import QUICHE_DOCKER_IMAGE, QUICHE_TIMEOUT, MAX_MESSAGES
 
 
 class SessionManager:
@@ -40,15 +39,14 @@ class SessionManager:
         return self.container_id
 
     async def stop_session(self):
-        if not self.container_id:
-            return
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "kill", self.container_id,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        await proc.communicate()
-        self.container_id = None
+        if self.container_id:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "kill", self.container_id,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            await proc.communicate()
+            self.container_id = None  # mark as stopped
 
 
 class NzQuiche(commands.Cog):
@@ -57,11 +55,12 @@ class NzQuiche(commands.Cog):
         self.max_sessions = 3
         self.active_sem = asyncio.Semaphore(self.max_sessions)
         self.session_queue = asyncio.Queue()
-        self.queued_users = set()    # users waiting in queue
-        self.sessions = {}           # user_id -> SessionManager (active)
+        self.queued_users = set()           # users waiting in queue
+        self.sessions = {}                  # user_id -> SessionManager
+        self.session_tasks = {}             # user_id -> asyncio.Task
 
         # cooldown & spam prevention
-        self.user_request_counts = {}  # user_id -> (count, last_time)
+        self.user_request_counts = {}       # user_id -> (count, last_time)
         self.max_queue_requests = 5
         self.cooldown_seconds = 300
 
@@ -75,32 +74,32 @@ class NzQuiche(commands.Cog):
     async def queue_loop(self):
         while True:
             user_id, ctx, main_file = await self.session_queue.get()
-            # remove from queued_users immediately since we are processing
             self.queued_users.discard(user_id)
 
-            try:
-                async with self.active_sem:
-                    # mark as active
-                    session = SessionManager(QUICHE_DOCKER_IMAGE)
-                    self.sessions[user_id] = session
-                    await asyncio.wait_for(self._run_python_session(ctx, session, main_file), timeout=QUICHE_TIMEOUT + 30)
-            except asyncio.TimeoutError:
-                await ctx.send("```Queued session timed out```")
-                if session.container_id:
+            async with self.active_sem:
+                session = SessionManager(QUICHE_DOCKER_IMAGE)
+                self.sessions[user_id] = session
+                task = asyncio.create_task(self._run_python_session(ctx, session, main_file))
+                self.session_tasks[user_id] = task
+
+                try:
+                    await asyncio.wait_for(task, timeout=QUICHE_TIMEOUT + 30)
+                except asyncio.TimeoutError:
+                    await ctx.send("```Queued session timed out```")
                     await session.stop_session()
-            except Exception as e:
-                await ctx.send(f"```Error in queued session: {e}```")
-            finally:
-                # remove from active sessions
-                self.sessions.pop(user_id, None)
-                self.session_queue.task_done()
+                    task.cancel()
+                except Exception as e:
+                    await ctx.send(f"```Error in queued session: {e}```")
+                finally:
+                    self.sessions.pop(user_id, None)
+                    self.session_tasks.pop(user_id, None)
+                    self.session_queue.task_done()
 
     # ---- Enqueue ----
     async def enqueue_python(self, ctx, main_file=None):
         user_id = ctx.author.id
         now = time.time()
 
-        # rate limiting
         count, last_time = self.user_request_counts.get(user_id, (0, now))
         if now - last_time > self.cooldown_seconds:
             count = 0
@@ -115,7 +114,6 @@ class NzQuiche(commands.Cog):
             await ctx.send("```You already have an active or queued session. Wait for it to finish.```")
             return
 
-        # queue the user
         self.queued_users.add(user_id)
         await self.session_queue.put((user_id, ctx, main_file))
         await ctx.send(f"```Your Python session has been queued. Position: {self.session_queue.qsize()}```")
@@ -125,6 +123,7 @@ class NzQuiche(commands.Cog):
         temp_dir = Path(tempfile.mkdtemp(prefix=f"quiche_{ctx.author.id}_"))
 
         try:
+            # collect attachments
             attachments = list(ctx.message.attachments)
             if ctx.message.reference:
                 try:
@@ -141,7 +140,7 @@ class NzQuiche(commands.Cog):
             for attach in attachments:
                 await attach.save(temp_dir / attach.filename)
 
-            # check for code blocks
+            # code block
             code_match = re.search(r"```(?:py|python)?\n(.*?)```", ctx.message.content, re.DOTALL)
             code_block_used = False
             if code_match:
@@ -207,9 +206,7 @@ class NzQuiche(commands.Cog):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-
-            MAX_MESSAGES = 15
-
+            
             async def stream(pipe, prefix=""):
                 buffer = b""
                 messages_sent = 0
@@ -237,12 +234,6 @@ class NzQuiche(commands.Cog):
                         msg = await self.bot.wait_for("message", check=check, timeout=QUICHE_TIMEOUT)
                     except asyncio.TimeoutError:
                         break
-
-                    '''
-                    if msg.content.strip() in ("~quiche exi", "~queue exit"):
-                        proc.kill()
-                        break
-                    '''
 
                     try:
                         proc.stdin.write((msg.content + "\n").encode())
@@ -288,19 +279,6 @@ class NzQuiche(commands.Cog):
             await ctx.send("```Usage: ~quiche set_role <@&role_id>```")
             return
         await self.bot.db.set_quiche_role(ctx.guild.id, role.id)
-        
-
-    @quiche.command(name="exit")
-    async def quiche_terminate(self, ctx):
-        user_id = ctx.author.id
-        session = self.sessions[user_id]
-        if session is not None:
-            await session.stop_session()
-            self.sessions.pop(user_id, None)
-            self.queued_users.discard(user_id)
-            await ctx.send("```Your session has been terminated.```")
-        else:
-            await ctx.send("```You don't have an active session```")
 
     @quiche.command(name="requirements")
     async def requirements(self, ctx):
@@ -330,7 +308,45 @@ class NzQuiche(commands.Cog):
         msg += "\n".join(str(uid) for uid in self.queued_users) or "None"
         msg += "```"
         await ctx.send(msg)
+    
+    @quiche.command(name="exit")
+    async def quiche_terminate(self, ctx):
+        user_id = ctx.author.id
+        session = self.sessions.get(user_id)
+        task = self.session_tasks.get(user_id)
 
+        if session:
+            if task:
+                task.cancel()
+            await session.stop_session()
+            self.sessions.pop(user_id, None)
+            self.queued_users.discard(user_id)
+            self.session_tasks.pop(user_id, None)
+            await ctx.send("```Your session has been terminated.```")
+        else:
+            await ctx.send("```You don't have an active session```")
+    
+    @quiche.command(name="killall")
+    @commands.has_permissions(administrator=True)
+    async def quiche_killall(self, ctx):
+        """Terminate all active and queued sessions."""
+        # Cancel running tasks and stop containers
+        for user_id, task in list(self.session_tasks.items()):
+            task.cancel()
+        for user_id, session in list(self.sessions.items()):
+            await session.stop_session()
+            self.sessions.pop(user_id, None)
+            self.session_tasks.pop(user_id, None)
+        # Clear queue
+        while not self.session_queue.empty():
+            try:
+                uid, _, _ = self.session_queue.get_nowait()
+                self.queued_users.discard(uid)
+                self.session_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+    
+        await ctx.send("```All sessions and queued users have been terminated.```")
 
 async def setup(bot):
     await bot.add_cog(NzQuiche(bot))
