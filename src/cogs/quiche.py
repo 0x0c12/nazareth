@@ -160,7 +160,7 @@ class NzQuiche(commands.Cog):
                 container_id = await session.start_session(temp_dir)
 
                 # persistent requirements
-                req_file = self.requirements_path / "requirements.txt"
+                req_file = self.requirements_path / str(ctx.author.id) / "requirements.txt"
                 if req_file.exists():
                     proc = await asyncio.create_subprocess_exec(
                         "docker", "cp",
@@ -209,16 +209,17 @@ class NzQuiche(commands.Cog):
                     if buffer:
                         await ctx.send(f"```{prefix}{buffer.decode(errors='replace')}```")
 
-                async def input_loop():
+                async def input_loop(proc, owner_id, channel):
                     def check(m):
-                        return m.author == ctx.author and m.channel == ctx.channel
+                        return m.author.id == owner_id and m.channel == channel
 
                     while True:
                         try:
                             msg = await self.bot.wait_for("message", check=check, timeout=QUICHE_TIMEOUT)
                         except asyncio.TimeoutError:
                             break
-                        if msg.content.strip() == "~quiche exit" or msg.content.strip() == "~queue exit":
+
+                        if msg.content.strip() in ("~quiche exit", "~queue exit"):
                             proc.kill()
                             break
                         try:
@@ -227,7 +228,7 @@ class NzQuiche(commands.Cog):
                         except Exception:
                             break
 
-                input_task = asyncio.create_task(input_loop())
+                input_task = asyncio.create_task(input_loop(proc, ctx.author.id, ctx.channel))
                 stdout_task = asyncio.create_task(stream(proc.stdout))
                 stderr_task = asyncio.create_task(stream(proc.stderr, "[stderr] "))
 
@@ -272,13 +273,17 @@ class NzQuiche(commands.Cog):
         if not ctx.message.attachments:
             await ctx.send("```Attach a requirements.txt file```")
             return
+    
         attach = ctx.message.attachments[0]
         if not attach.filename.lower().endswith(".txt"):
             await ctx.send("```File must be a .txt requirements file```")
             return
-        self.requirements_path.mkdir(parents=True, exist_ok=True)
-        await attach.save(self.requirements_path / "requirements.txt")
-        await ctx.send("```Saved requirements.txt persistently```")
+        user_path = self.requirements_path / str(ctx.author.id)
+        user_path.mkdir(parents=True,exist_ok=True)
+        # self.requirements_path.mkdir(parents=True, exist_ok=True)
+        # await attach.save(eequirements_path / "requirements.txt")
+        await attach.save(user_path / "requirements.txt")
+        await ctx.send(f"```Saved requirements.txt persistently for {ctx.author.name}```")
 
     @quiche.command(name="run")
     async def run_python(self, ctx, *, main_file: str = None):
