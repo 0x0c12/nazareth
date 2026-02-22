@@ -1,6 +1,9 @@
-with open("token.txt") as f:
+with open("token.txt", 'r') as f:
     token = f.read().strip()    
-    
+
+with open("osu_secrets.txt", 'r') as g:
+        OSU_CLIENT_ID, OSU_CLIENT_SECRET = (next(g).strip() for _ in range(2))
+ 
 prefix = "~"
 cog_folder = "cogs"
 event_folder = "events"
@@ -15,6 +18,15 @@ brainrot_channels = [
     1435671633271587018
 ]
 
+USER_WHITELIST = [
+    948957008160231474,
+    886937741667999774,
+    754944535506845767,
+    1004685195288522813,
+    1169634638524846090,
+    852050006080749570
+]
+
 QUICHE_DOCKER_IMAGE = "quiche-python"
-QUICHE_TIMEOUT = 60
+QUICHE_TIMEOUT = 300
 MAX_MESSAGES = 30

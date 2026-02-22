@@ -63,6 +63,16 @@ class NzDatabase:
                     role_id INTEGER
                 )
             """)
+            await db.commit()
+            # Osu accounts
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS OsuAccounts (
+                    discord_id INTEGER PRIMARY KEY,
+                    user_id_osu INTEGER NOT NULL,
+                    linked_at TEXT NOT NULL
+                )
+            """)
+            await db.commit()
 
     # ===== Verification methods =====
     async def set_verified_role(self, guild_id: int, role_id: int):
@@ -201,3 +211,27 @@ class NzDatabase:
             )
             row = await cursor.fetchone()
             return row[0] if row else None
+    # ===== Osu Methods =====
+    async def link_osu(self, discord_id: int, osu_id: int, linked_at: str):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("""
+                INSERT INTO OsuAccounts(discord_id, user_id_osu, linked_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(discord_id)
+                DO UPDATE SET user_id_osu=excluded.user_id_osu,
+                              linked_at=excluded.linked_at
+            """, (discord_id, osu_id, linked_at))
+            await db.commit()
+            
+    async def get_osu_id(self, discord_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "SELECT user_id_osu FROM OsuAccounts WHERE discord_id=?", (discord_id,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def unlink_osu(self, discord_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("DELETE FROM OsuAccounts WHERE discord_id=?", (discord_id,))
+            await db.commit()

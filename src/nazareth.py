@@ -5,7 +5,10 @@ import discord
 from discord.ext import commands
 import config
 from cogs.nz_sticky_db import NzStickyDb
+from services.osu_service import OsuService
 from nz_database import NzDatabase
+from osu import AsynchronousClient
+from osu import AsynchronousAuthHandler
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -18,12 +21,18 @@ class Nazareth(commands.Bot):
             intents=intents
         )
         self.db=None
-        self.sticky_db=None
+        self.sticky_db = None
+        self.osu_client = None
+        self.osu_auth = None
+        self.osu_service = None
 
     async def setup_hook(self):
         self.db = NzDatabase("nazareth.db")
-        await self.db.init_tables()
+        # await self.db.init_tables()
         self.sticky_db = NzStickyDb("nazareth.db")
+        self.osu_auth = AsynchronousAuthHandler(int(config.OSU_CLIENT_ID), config.OSU_CLIENT_SECRET, None)
+        self.osu_client = AsynchronousClient(self.osu_auth)
+        self.osu_service = OsuService(self.osu_client, self.db)
         # await self.db.init_db()
         folders = [config.cog_folder, config.event_folder]
 
@@ -39,7 +48,6 @@ class Nazareth(commands.Bot):
 
     async def on_ready(self):
         print(f"Logged in as {self.user}")
-
 
 nz = Nazareth()
 
