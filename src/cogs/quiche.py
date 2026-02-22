@@ -18,10 +18,9 @@ class SessionManager:
 
     async def start_session(self, temp_dir: Path):
         self.temp_dir = temp_dir
-
         proc = await asyncio.create_subprocess_exec(
             "docker", "run", "-d",
-            "--network", "none",
+            "--network", "bridge",  # allow limited network
             "--memory", "512m",
             "--cpus", "1",
             "--pids-limit", "128",
@@ -29,109 +28,68 @@ class SessionManager:
             "--cap-drop", "ALL",
             "-v", f"{temp_dir}:/home/quiche",
             "--rm",
-            self.docker_image, "sleep", "infinity",
+            self.docker_image,
+            "sleep", "infinity",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
-
         out, err = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"Docker run failed: {err.decode()}")
-
         self.container_id = out.decode().strip()
         return self.container_id
 
     async def stop_session(self):
         if not self.container_id:
             return
-
         proc = await asyncio.create_subprocess_exec(
             "docker", "kill", self.container_id,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
         await proc.communicate()
-
         self.container_id = None
 
 
 class NzQuiche(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.running_session = asyncio.Lock()
+        self.max_sessions = 3
+        self.active_sem = asyncio.Semaphore(self.max_sessions)
+        self.session_queue = asyncio.Queue()
+        self.queued_users = set()
+        self.sessions = {}
         self.requirements_path = Path(tempfile.gettempdir()) / "quiche_requirements"
+        self.queue_loop_task = asyncio.create_task(self.queue_loop())
 
-    async def cog_check(self, ctx):
-        if not ctx.guild:
-            await ctx.send("```Commands can only be executed in servers.```")
-            return False
+    async def queue_loop(self):
+        while True:
+            user_id, ctx, main_file = await self.session_queue.get()
+            try:
+                await self._run_python_session(ctx, main_file)
+            except Exception as e:
+                await ctx.send(f"```Error in queued session: {e}```")
+            finally:
+                self.queued_users.discard(user_id)
+                self.session_queue.task_done()
 
-        if ctx.command.name == "set_role":
-            return True
-
-        try:
-            quiche_role_id = await self.bot.db.get_quiche_role(ctx.guild.id)
-            if not quiche_role_id:
-                await ctx.send("```No role set for quiche.```")
-                return False
-
-            role = ctx.guild.get_role(quiche_role_id)
-            if role not in ctx.author.roles:
-                await ctx.send("```You don't have permission to use this command.```")
-                return False
-
-        except Exception as e:
-            await ctx.send(f"```Error checking permissions: {e}```")
-            return False
-
-        return True
-
-    @commands.group(name="quiche", invoke_without_command=True)
-    async def quiche(self, ctx):
-        await ctx.send(
-            "```Subcommands:\n"
-            "set_role <@&role_id>\n"
-            "requirements <requirements.txt>\n"
-            "python <main_file.py>```"
-        )
-
-    @commands.has_permissions(manage_roles=True)
-    @quiche.command(name="set_role")
-    async def set_role(self, ctx, role: discord.Role = None):
-        if role is None:
-            await ctx.send("```Usage: ~quiche set_role <@&role_id>```")
+    async def enqueue_python(self, ctx, main_file):
+        user_id = ctx.author.id
+        if user_id in self.queued_users:
+            await ctx.send("```You already have a queued session. Wait for it to start.```")
             return
-        await self.bot.db.set_quiche_role(ctx.guild.id, role.id)
-        await ctx.send(f"```Quiche role successfully set to {role}```")
+        self.queued_users.add(user_id)
+        await self.session_queue.put((user_id, ctx, main_file))
+        await ctx.send(f"```Your Python session has been queued. Position: {self.session_queue.size()}```")
 
-    @quiche.command(name="requirements")
-    async def requirements(self, ctx):
-        if not ctx.message.attachments:
-            await ctx.send("```Attach a requirements.txt file```")
-            return
-
-        attach = ctx.message.attachments[0]
-        if not attach.filename.lower().endswith(".txt"):
-            await ctx.send("```File must be a .txt requirements file```")
-            return
-
-        self.requirements_path.mkdir(parents=True, exist_ok=True)
-        await attach.save(self.requirements_path / "requirements.txt")
-        await ctx.send("```Saved requirements.txt persistently```")
-
-    @quiche.command(name="python")
-    async def run_python(self, ctx, *, main_file: str = None):
-        if self.running_session.locked():
-            await ctx.send("```Another Python session is running. Wait.```")
-            return
-
-        async with self.running_session:
+    async def _run_python_session(self, ctx, main_file=None):
+        async with self.active_sem:
             temp_dir = Path(tempfile.mkdtemp(prefix=f"quiche_{ctx.author.id}_"))
             session = SessionManager(QUICHE_DOCKER_IMAGE)
+            self.sessions[ctx.author.id] = session
 
             try:
                 attachments = list(ctx.message.attachments)
-
                 if ctx.message.reference:
                     try:
                         ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
@@ -141,34 +99,26 @@ class NzQuiche(commands.Cog):
 
                 filenames = [a.filename for a in attachments]
                 if len(filenames) != len(set(filenames)):
-                    await ctx.send("```Error: Two files with the same name cannot be parsed.```")
+                    await ctx.send("```Error: Duplicate filenames detected.```")
                     return
 
                 for attach in attachments:
                     await attach.save(temp_dir / attach.filename)
 
-                py_files = [f for f in temp_dir.iterdir() if f.suffix == ".py"]
-
-                code_match = re.search(
-                    r"```(?:py|python)?\n(.*?)```",
-                    ctx.message.content,
-                    re.DOTALL
-                )
-
+                code_match = re.search(r"```(?:py|python)?\n(.*?)```", ctx.message.content, re.DOTALL)
                 code_block_used = False
                 if code_match:
                     code_content = code_match.group(1)
-                    main_path = temp_dir / "main.py"
-                    main_path.write_text(code_content)
+                    (temp_dir / "main.py").write_text(code_content)
                     code_block_used = True
 
+                py_files = [f for f in temp_dir.iterdir() if f.suffix == ".py"]
                 if code_block_used:
                     selected_file = "main.py"
                 else:
                     if attachments and not py_files:
-                        await ctx.send("```Error: Files supplied but no Python file found.```")
+                        await ctx.send("```Error: No Python file found among attachments.```")
                         return
-
                     if len(py_files) == 1 and not main_file:
                         selected_file = py_files[0].name
                     elif len(py_files) > 1 and not main_file:
@@ -186,7 +136,7 @@ class NzQuiche(commands.Cog):
 
                 container_id = await session.start_session(temp_dir)
 
-                # Install requirements if saved
+                # persistent requirements
                 req_file = self.requirements_path / "requirements.txt"
                 if req_file.exists():
                     proc = await asyncio.create_subprocess_exec(
@@ -203,8 +153,8 @@ class NzQuiche(commands.Cog):
 
                     proc = await asyncio.create_subprocess_exec(
                         "docker", "exec", container_id,
-                        "python", "-m", "pip",
-                        "install", "-r", "/home/quiche/requirements.txt",
+                        "python", "-m", "pip", "install",
+                        "-r", "/home/quiche/requirements.txt",
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE
                     )
@@ -213,6 +163,7 @@ class NzQuiche(commands.Cog):
                         await ctx.send(f"```Requirements install failed:\n{err.decode()}```")
                         return
 
+                # run code with chunk-based input/output
                 proc = await asyncio.create_subprocess_exec(
                     "docker", "exec", "-i", container_id,
                     "python", selected_file,
@@ -222,17 +173,18 @@ class NzQuiche(commands.Cog):
                 )
 
                 async def stream(pipe, prefix=""):
-                    buffer = ""
+                    buffer = b""
                     while True:
-                        line = await pipe.readline()
-                        if not line:
+                        chunk = await pipe.read(256)  # read small chunks
+                        if not chunk:
                             break
-                        buffer += prefix + line.decode()
-                        if len(buffer) > 1800:
-                            await ctx.send(f"```{buffer}```")
-                            buffer = ""
+                        buffer += chunk
+                        if b"\n" in buffer or buffer.endswith(b": ") or len(buffer) > 1800:
+                            await ctx.send(f"```{prefix}{buffer.decode(errors='replace')}```")
+                            buffer = b""
+
                     if buffer:
-                        await ctx.send(f"```{buffer}```")
+                        await ctx.send(f"```{prefix}{buffer.decode(errors='replace')}```")
 
                 async def input_loop():
                     def check(m):
@@ -243,11 +195,9 @@ class NzQuiche(commands.Cog):
                             msg = await self.bot.wait_for("message", check=check, timeout=QUICHE_TIMEOUT)
                         except asyncio.TimeoutError:
                             break
-
                         if msg.content.strip() == "~quiche exit":
                             proc.kill()
                             break
-
                         try:
                             proc.stdin.write((msg.content + "\n").encode())
                             await proc.stdin.drain()
@@ -272,6 +222,42 @@ class NzQuiche(commands.Cog):
                 await session.stop_session()
                 if temp_dir.exists():
                     shutil.rmtree(temp_dir)
+                self.sessions.pop(ctx.author.id, None)
+
+    @commands.group(name="quiche", invoke_without_command=True)
+    async def quiche(self, ctx):
+        await ctx.send(
+            "```Subcommands:\n"
+            "set_role <@&role_id>\n"
+            "requirements <requirements.txt>\n"
+            "python <main_file.py>```"
+        )
+
+    @commands.has_permissions(manage_roles=True)
+    @quiche.command(name="set_role")
+    async def set_role(self, ctx, role: discord.Role = None):
+        if role is None:
+            await ctx.send("```Usage: ~quiche set_role <@&role_id>```")
+            return
+        await self.bot.db.set_quiche_role(ctx.guild.id, role.id)
+        await ctx.send(f"```Quiche role successfully set to {role}```")
+
+    @quiche.command(name="requirements")
+    async def requirements(self, ctx):
+        if not ctx.message.attachments:
+            await ctx.send("```Attach a requirements.txt file```")
+            return
+        attach = ctx.message.attachments[0]
+        if not attach.filename.lower().endswith(".txt"):
+            await ctx.send("```File must be a .txt requirements file```")
+            return
+        self.requirements_path.mkdir(parents=True, exist_ok=True)
+        await attach.save(self.requirements_path / "requirements.txt")
+        await ctx.send("```Saved requirements.txt persistently```")
+
+    @quiche.command(name="python")
+    async def run_python(self, ctx, *, main_file: str = None):
+        await self.enqueue_python(ctx, main_file)
 
 
 async def setup(bot):
