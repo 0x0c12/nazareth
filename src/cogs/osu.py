@@ -1,5 +1,7 @@
 from discord.ext import commands
 import discord
+import random as rand
+import time
 
 class NzOsu(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -9,7 +11,7 @@ class NzOsu(commands.Cog):
 
     @commands.group(name="osu", invoke_without_command=True)
     async def osu(self, ctx):
-        await ctx.send("```Available subcommands\nlink\nunlink\nprofile\ntop\nrecent_score```")
+        await ctx.send("```Available subcommands\nlink\nunlink\nprofile\ntop\nrecent_score\nskin_random```")
 
     @osu.command(name="link")
     async def link(self, ctx, username):
@@ -20,14 +22,13 @@ class NzOsu(commands.Cog):
             await ctx.send(f"```Link failed: {e}```")
 
     @osu.command(name="profile")
-    async def profile(self, ctx, memb: discord.Member | None = None, mod: str = ''):
+    async def profile(self, ctx, memb: discord.Member | None = None, mod: str = 'osu'):
         member = memb.id if memb is not None else ctx.author.id
         mode = mod
 
-        if mode is not '':
-            mode = mode.lower()
-            if mode not in self.valid_modes:
-                mode = ''
+        mode = mode.lower()
+        if mode not in self.valid_modes:
+            mode = 'osu'
 
         try:
             user = await self.service.get_profile(member, mode)
@@ -48,14 +49,17 @@ class NzOsu(commands.Cog):
             )
 
             prof_embed.add_field(
-                name="Performance",
+                name="Statistics",
                 value=(
                     f"PP: **{stats.pp:,}**\n"
                     f"Accuracy: **{stats.accuracy*100:.2f}%**\n"
-                    f"Level: **{stats.level.current}**"
+                    f"Level: **{stats.level.current}**\n"
+                    f"Playtime: **{stats.play_time//3600} hrs**"
                 ),
                 inline=True
             )
+
+            prof_embed.set_footer(text=f"joined osu! at {str(user.join_date)[:-6]}")
 
             await ctx.send(embed=prof_embed)
         except Exception as e:
@@ -66,6 +70,7 @@ class NzOsu(commands.Cog):
         member = memb.id if memb is not None else ctx.author.id
         mode = mod
 
+        mode = mode.lower()
         if mode not in self.valid_modes:
             mode = 'osu'
 
@@ -94,7 +99,7 @@ class NzOsu(commands.Cog):
 
                 lines.append(
                     f"**{i}.** "
-                    f"[{score.beatmapset.title} [{score.beatmap.version}]]({beatmap_url})\n"
+                    f"[{score.beatmapset.title} [{score.beatmap.version} - {score.beatmap.difficulty_rating:.1f}*]]({beatmap_url})\n"
                     f"**{score.pp:.0f}pp** - {acc} - {score.max_combo}x +{mods}"
                 )
 
@@ -110,6 +115,7 @@ class NzOsu(commands.Cog):
         member = memb.id if memb is not None else ctx.author.id
         mode = mod
 
+        mode = mode.lower()
         if mode not in self.valid_modes:
             mode = 'osu'
 
@@ -139,6 +145,15 @@ class NzOsu(commands.Cog):
             await ctx.send(embed=r_embed)
         except Exception as e:
             await ctx.send(f"```Error: {e}```")
+
+    @osu.command(name="skin_random", aliases=['skr'])
+    async def skin_random(self, ctx):
+        try:
+            base_url = "https://skins.osuck.net/skins/"
+            skin_id = str(rand.randint(1, 4000))
+            await ctx.send(base_url + skin_id)
+        except Exception as e:
+            await ctx.send(f"```I honestly have NO IDEA how this command failed\n{e}```")
 
     @osu.command(name="unlink")
     async def unlink(self, ctx):
