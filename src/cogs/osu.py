@@ -2,6 +2,13 @@ from discord.ext import commands
 import discord
 import random as rand
 import time
+import asyncio
+import struct
+import aiohttp
+from pathlib import Path
+
+DANSER_PATH = "/usr/bin/danser-cli"
+USER_COOLDOWN = 300
 
 class NzOsu(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -9,10 +16,124 @@ class NzOsu(commands.Cog):
         self.service = bot.osu_service
         self.valid_modes = {"osu", "taiko", "mania", "fruits"}
 
+        self.render_queue = asyncio.Queue()
+        self.users_rendering = set()
+        self.cooldowns = {}
+        self.worker_task = bot.loop.create_task(self._render_worker())
+
+    async def _render_worker(self):
+        await self.bot.wait_until_ready()
+
+        while not self.bot.is_closed():
+            ctx, attachment = await self.render_queue.get()
+
+            try:
+                await self._process_render(ctx, attachment)
+            except Exception as e:
+                await ctx.send(f"```Render failed: {e}```")
+
+            self.users_rendering.discard(ctx.author.id)
+            self.render_queue.task_done()
+
+    async def _process_render(self, ctx, attachment):
+        await ctx.send("```Rendering started...```")
+
+        base_path = Path("/home/twilight/dev/nazareth/src/services/osu")
+        replay_file_name = "replay.osr"
+        replay_path = base_path / replay_file_name
+
+        await attachment.save(replay_path)
+
+        beatmap_path = await self.service.download_beatmap_from_replay(
+            replay_file_name
+        )
+
+        process = await asyncio.create_subprocess_exec(
+            DANSER_PATH,
+            "-replay", str(base_path / replay_file_name),
+            "-record",
+            "-out", replay_file_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        await process.communicate()
+
+        '''
+        if not output_path.exists():
+            raise Exception("Video not generated.")
+        '''
+
+        await ctx.send("```Uploading render...```")
+        replay_file_path = Path('/home/twilight/.local/share/danser/videos/replay.osr.mp4')
+
+        async def upload_to_catbox(file_path: str) -> str:
+            async with aiohttp.ClientSession() as session:
+                with open(file_path, 'rb') as f:
+                    data = aiohttp.FormData()
+                    data.add_field("reqtype", "fileupload")
+                    data.add_field("userhash", "")
+                    data.add_field("fileToUpload", f, filename=file_path.name)
+                    async with session.post("https://catbox.moe/user/api.php", data=data) as resp:
+                        resp.raise_for_status()
+                        return await resp.text()
+        replay_url = await upload_to_catbox(replay_file_path)
+        await ctx.send(replay_url)
+        replay_file_path.unlink()
+
+    async def _get_queue_position(self, user_id):
+        for idx, (ctx, _) in enumerate(self.render_queue._queue):
+            if ctx.author.id == user_id:
+                return idx + 1
+        return 1
+
     @commands.group(name="osu", invoke_without_command=True)
     async def osu(self, ctx):
-        await ctx.send("```Available subcommands\nlink\nunlink\nprofile\ntop\nrecent_score\nskin_random```")
+        await ctx.send("```Available subcommands\nlink\nunlink\nprofile\ntop\nrecent_score\nskin_random\nrender```")
 
+    @commands.cooldown(1, USER_COOLDOWN, commands.BucketType.user)
+    @osu.command(name="render")
+    async def render(self, ctx):
+        attachment = (
+            ctx.message.attachments
+            or (
+                ctx.message.reference
+                and (await ctx.message.channel.fetch_message(ctx.message.reference.message_id)).attachments
+            )
+            or [None]
+        )[0]
+        
+        if not attachment:
+            return await ctx.send("```Please attach a .osr replay file.```")
+
+        if not attachment.filename.endswith(".osr"):
+            return await ctx.send("```Invalid file. Please upload a .osr replay.```")
+
+        user_id = ctx.author.id
+        now = time.time()
+
+        if user_id in self.cooldowns:
+            remaining = USER_COOLDOWN - (now - self.cooldowns[user_id])
+            if remaining > 0:
+                return await ctx.send(
+                    f"```You are on cooldown.\nTry again in {int(remaining)} seconds.```"
+                )
+        if user_id in self.users_rendering:
+            position = await self._get_queue_position(user_id)
+            return await ctx.send(
+                f"```You already have a render queued.\nPosition in queue: {position}```"
+            )
+
+        self.users_rendering.add(user_id)
+        self.cooldowns[user_id] = now
+        await self.render_queue.put((ctx, attachment))
+
+        position = self.render_queue.qsize()
+
+        await ctx.send(
+            f"```Replay added to queue.\nPosition: {position}```"
+        )
+            
     @osu.command(name="link")
     async def link(self, ctx, username):
         try:

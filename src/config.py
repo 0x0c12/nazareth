@@ -2,7 +2,7 @@ with open("token.txt", 'r') as f:
     token = f.read().strip()    
 
 with open("osu_secrets.txt", 'r') as g:
-        OSU_CLIENT_ID, OSU_CLIENT_SECRET = (next(g).strip() for _ in range(2))
+        OSU_CLIENT_ID, OSU_CLIENT_SECRET, OSU_CLIENT_COOKIE = (next(g).strip() for _ in range(3))
  
 prefix = "~"
 cog_folder = "cogs"
@@ -15,7 +15,13 @@ brainrot_channels = [
     1473024408091361473,
     1471190640074166315,
     1470427392328601665,
-    1435671633271587018
+    # 1435671633271587018 unicore
+]
+
+ADMIN_WHITELIST = [
+    948957008160231474,
+    886937741667999774,
+    1434567471863697490
 ]
 
 USER_WHITELIST = [

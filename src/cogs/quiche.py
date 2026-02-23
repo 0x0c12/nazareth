@@ -8,8 +8,7 @@ import subprocess
 import re
 import time
 
-from config import QUICHE_DOCKER_IMAGE, QUICHE_TIMEOUT, MAX_MESSAGES, USER_WHITELIST
-
+from config import QUICHE_DOCKER_IMAGE, QUICHE_TIMEOUT, MAX_MESSAGES, USER_WHITELIST, ADMIN_WHITELIST
 
 class SessionManager:
     def __init__(self, docker_image: str):
@@ -20,7 +19,7 @@ class SessionManager:
         proc = await asyncio.create_subprocess_exec(
             "docker", "run", "-d",
             "--network", "bridge",
-            "--memory", "512m",
+            "--memory", "128m",
             "--cpus", "1",
             "--pids-limit", "128",
             "--security-opt", "no-new-privileges",
@@ -71,6 +70,36 @@ class NzQuiche(commands.Cog):
 
         # start queue loop
         self.queue_loop_task = asyncio.create_task(self.queue_loop())
+
+    async def cog_check(self, ctx):
+        if not ctx.guild:
+            await ctx.send("```Python execution can only be done in servers.```")
+            return False
+
+        if ctx.command.name == "set_role":
+            return True
+
+        try:
+            quiche_role_id = await self.bot.db.get_quiche_role(ctx.guild.id)
+            if not quiche_role_id:
+                await ctx.send(
+                    "```No role set for quiche, please set a role with ~quiche set_role <@&role_id>```"
+                )
+                return False
+
+            role = ctx.guild.get_role(quiche_role_id)
+            if role is None:
+                await ctx.send("```Configured role no longer exists, please set it again```")
+                return False
+            
+            if role not in ctx.author.roles:
+                await ctx.send("```You don't have the permission to use this command.```")
+                return False
+        except Exception as e:
+            await ctx.send(f"```Error checking permissions: {e}```")
+            return False
+        
+        return True
 
     # ---- Queue Loop ----
     async def queue_loop(self):
@@ -290,6 +319,7 @@ class NzQuiche(commands.Cog):
             await ctx.send("```Usage: ~quiche set_role <@&role_id>```")
             return
         await self.bot.db.set_quiche_role(ctx.guild.id, role.id)
+        await ctx.send(f"```Successfully set quiche role to {role}```")
 
     @quiche.command(name="requirements")
     async def requirements(self, ctx):
@@ -341,9 +371,16 @@ class NzQuiche(commands.Cog):
             await ctx.send("```You don't have an active session```")
     
     @quiche.command(name="killall")
-    @commands.is_owner()
     async def quiche_killall(self, ctx):
         """Terminate all active and queued sessions."""
+        if not ctx.author.id in ADMIN_WHITELIST:
+            await ctx.send("```You are not allowed to run this command.```")
+            return
+
+        if not(self.sessions and self.session_queue):
+            await ctx.send("```No sessions or queues running as of now.```")
+            return
+
         # trigger stop events
         for user_id in list(self.stop_events.keys()):
             self.stop_events[user_id].set()

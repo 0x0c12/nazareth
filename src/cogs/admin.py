@@ -8,8 +8,11 @@ class NzCogManager(commands.Cog):
         self.bot = bot
 
     @commands.command(name="reload")
-    @commands.is_owner()
     async def reload_cog(self, ctx, cog: str = None):
+        if ctx.author.id not in config.ADMIN_WHITELIST:
+            await ctx.send("You are not allowed to use this command.")
+            return
+
         if cog is None:
             await ctx.send("Usage: `~reload <cog_name>` or `~reload all`")
             return

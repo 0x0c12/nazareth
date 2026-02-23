@@ -5,7 +5,7 @@ import discord
 from discord.ext import commands
 import config
 from cogs.nz_sticky_db import NzStickyDb
-from services.osu_service import OsuService
+from services.osu.osu_service import OsuService
 from nz_database import NzDatabase
 from osu import AsynchronousClient
 from osu import AsynchronousAuthHandler
@@ -32,7 +32,7 @@ class Nazareth(commands.Bot):
         self.sticky_db = NzStickyDb("nazareth.db")
         self.osu_auth = AsynchronousAuthHandler(int(config.OSU_CLIENT_ID), config.OSU_CLIENT_SECRET, None)
         self.osu_client = AsynchronousClient(self.osu_auth)
-        self.osu_service = OsuService(self.osu_client, self.db)
+        self.osu_service = OsuService(self.osu_client, self.db, config.OSU_CLIENT_COOKIE)
         # await self.db.init_db()
         folders = [config.cog_folder, config.event_folder]
 
