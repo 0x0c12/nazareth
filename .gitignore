@@ -8,7 +8,12 @@ env/
 *.egg-info/
 
 token.txt
+
 osu_secrets.txt
+beatmap_cache/
+*.osr
+*.osu
+*.osz
 
 .log
 *.db
