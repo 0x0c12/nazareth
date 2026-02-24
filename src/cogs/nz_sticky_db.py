@@ -43,3 +43,6 @@ class NzStickyDb:
                 row[0]: {"content": row[1], "message_id": row[2], "last_msg_id": None}
                 for row in rows
             }
+
+async def setup(bot):
+    pass

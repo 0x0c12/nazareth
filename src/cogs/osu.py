@@ -32,6 +32,7 @@ class NzOsu(commands.Cog):
 
             try:
                 await self._process_render(ctx, attachment)
+                self.cooldowns[ctx.author.id] = time.time()
             except Exception as e:
                 await ctx.send(f"```Render failed: {e}```")
 
@@ -76,7 +77,7 @@ class NzOsu(commands.Cog):
         await ctx.send("```Rendering started...```")
         # clear out the previously rendered file
         replay_file = Path(f'/home/twilight/.local/share/danser/videos/replay.osr.mp4')
-        if not replay_file.exists():
+        if replay_file.exists():
             replay_file.unlink()
 
         # fetch the replay file from attachments 
@@ -98,17 +99,19 @@ class NzOsu(commands.Cog):
             "-record",
             "-skip",
             "-out", replay_file_name,
-            "-skin=Twink",
+            "-skin", "MonkoGlassTest",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
 
-        await process.communicate()
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            raise Exception(f"Danser failed:\n{stderr.decode()}") 
 
-        '''
+        output_path = Path('/home/twilight/.local/share/danser/videos/replay.osr.mp4')
+
         if not output_path.exists():
-            raise Exception("Video not generated.")
-        '''
+            raise Exception("Danser exited cleanly but produced no file.")
 
         # upload the render
         await ctx.send("```Uploading render...```")
@@ -161,7 +164,6 @@ class NzOsu(commands.Cog):
             )
 
         self.users_rendering.add(user_id)
-        self.cooldowns[user_id] = now
         await self.render_queue.put((ctx, attachment))
 
         position = self.render_queue.qsize()
