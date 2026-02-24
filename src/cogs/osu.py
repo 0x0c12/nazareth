@@ -5,10 +5,13 @@ import time
 import asyncio
 import struct
 import aiohttp
+import uuid
 from pathlib import Path
+import subprocess
+import os
 
 DANSER_PATH = "/usr/bin/danser-cli"
-USER_COOLDOWN = 300
+USER_COOLDOWN = 600
 
 class NzOsu(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -35,24 +38,67 @@ class NzOsu(commands.Cog):
             self.users_rendering.discard(ctx.author.id)
             self.render_queue.task_done()
 
+    async def _git_run(self, cmd: list[str]) -> str:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Command failed: {' '.join(cmd)}\n{stderr.decode().strip()}"
+            )
+
+        return stdout.decode().strip()
+
+    async def _git_command(self, repo: Path, *args: str) -> str:
+        return await self._git_run(["git", "-C", str(repo), *args])
+
+    async def _upload_replay(self, replay_file_path: Path, commit_message: str) -> str:
+        replay_file_path = replay_file_path.resolve()
+
+        await self._git_command(replay_file_path, "add", "-A")
+
+        try:
+            await self._git_command(replay_file_path, "commit", "-m", f"for {commit_message}")
+        except RuntimeError as e:
+            if "nothing to commit" not in str(e):
+                raise
+        
+        await self._git_command(replay_file_path, "push", "origin", "main")
+
+        return await self._git_command(replay_file_path, "rev-parse", "HEAD")
+
     async def _process_render(self, ctx, attachment):
         await ctx.send("```Rendering started...```")
+        # clear out the previously rendered file
+        replay_file = Path(f'/home/twilight/.local/share/danser/videos/replay.osr.mp4')
+        if not replay_file.exists():
+            replay_file.unlink()
 
+        # fetch the replay file from attachments 
         base_path = Path("/home/twilight/dev/nazareth/src/services/osu")
         replay_file_name = "replay.osr"
         replay_path = base_path / replay_file_name
 
         await attachment.save(replay_path)
 
+        # download beatmap if not downlaoded
         beatmap_path = await self.service.download_beatmap_from_replay(
             replay_file_name
         )
-
+        
+        # render
         process = await asyncio.create_subprocess_exec(
             DANSER_PATH,
             "-replay", str(base_path / replay_file_name),
             "-record",
+            "-skip",
             "-out", replay_file_name,
+            "-skin=Twink",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -64,26 +110,16 @@ class NzOsu(commands.Cog):
             raise Exception("Video not generated.")
         '''
 
+        # upload the render
         await ctx.send("```Uploading render...```")
-        replay_file_path = Path('/home/twilight/.local/share/danser/videos/replay.osr.mp4')
-
-        async def upload_to_catbox(file_path: str) -> str:
-            async with aiohttp.ClientSession() as session:
-                with open(file_path, 'rb') as f:
-                    data = aiohttp.FormData()
-                    data.add_field("reqtype", "fileupload")
-                    data.add_field("userhash", "")
-                    data.add_field("fileToUpload", f, filename=file_path.name)
-                    async with session.post("https://catbox.moe/user/api.php", data=data) as resp:
-                        resp.raise_for_status()
-                        return await resp.text()
-        replay_url = await upload_to_catbox(replay_file_path)
-        await ctx.send(replay_url)
-        replay_file_path.unlink()
+        replay_file_path = Path(f'/home/twilight/.local/share/danser/videos/')
+        commit_id = await self._upload_replay(replay_file_path, f"for {ctx.author.display_name}")
+        replay_url = f"https://github.com/0x0c12/nazareth-replay-renders/raw/{commit_id}/replay.osr.mp4"
+        await ctx.send(f"<@{ctx.author.id}> your osu replay fresh out of the oven!\n[replay]({replay_url})")
 
     async def _get_queue_position(self, user_id):
         for idx, (ctx, _) in enumerate(self.render_queue._queue):
-            if ctx.author.id == user_id:
+            if ctx.author.id == use_id:
                 return idx + 1
         return 1
 
@@ -283,6 +319,11 @@ class NzOsu(commands.Cog):
             await ctx.send("```Unlinked successfully```")
         except Exception as e:
             await ctx.send(f"Unlink failed: {e}")
+
+    @render.error
+    async def render_error(self, ctx, error):
+        if isinstance(error, commands.CommandOnCooldown):
+            await ctx.send(f"```Woah slow down there, rendering takes up a lot of resources\non cooldown, try again in {error.retry_after:.1f} seconds.```")
 
 async def setup(bot):
     await bot.add_cog(NzOsu(bot))
