@@ -7,12 +7,19 @@ class NzCogManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="reload")
-    async def reload_cog(self, ctx, cog: str = None):
+    async def cog_check(self, ctx):
         if ctx.author.id not in config.ADMIN_WHITELIST:
             await ctx.send("You are not allowed to use this command.")
-            return
+            return False
+        return True
 
+    @commands.command(name="shutdown")
+    async def shutdown(self, ctx):
+        await ctx.send("Cya next time...")
+        await self.bot.close()
+
+    @commands.command(name="reload")
+    async def reload_cog(self, ctx, cog: str = None):
         if cog is None:
             await ctx.send("Usage: `~reload <cog_name>` or `~reload all`")
             return

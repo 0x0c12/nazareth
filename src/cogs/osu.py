@@ -32,8 +32,9 @@ class NzOsu(commands.Cog):
 
             try:
                 await self._process_render(ctx, attachment)
-                self.cooldowns[ctx.author.id] = time.time()
+                # self.cooldowns[ctx.author.id] = time.time()
             except Exception as e:
+                self.cooldowns.pop(ctx.author.id)
                 await ctx.send(f"```Render failed: {e}```")
 
             self.users_rendering.discard(ctx.author.id)
@@ -99,7 +100,7 @@ class NzOsu(commands.Cog):
             "-record",
             "-skip",
             "-out", replay_file_name,
-            "-skin", "MonkoGlassTest",
+            "-skin", "Astolfo",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -107,7 +108,7 @@ class NzOsu(commands.Cog):
         stdout, stderr = await process.communicate()
         if process.returncode != 0:
             raise Exception(f"Danser failed:\n{stderr.decode()}") 
-
+ 
         output_path = Path('/home/twilight/.local/share/danser/videos/replay.osr.mp4')
 
         if not output_path.exists():
@@ -118,11 +119,12 @@ class NzOsu(commands.Cog):
         replay_file_path = Path(f'/home/twilight/.local/share/danser/videos/')
         commit_id = await self._upload_replay(replay_file_path, f"for {ctx.author.display_name}")
         replay_url = f"https://github.com/0x0c12/nazareth-replay-renders/raw/{commit_id}/replay.osr.mp4"
+        replay_path.unlink()
         await ctx.send(f"<@{ctx.author.id}> your osu replay fresh out of the oven!\n[replay]({replay_url})")
 
     async def _get_queue_position(self, user_id):
         for idx, (ctx, _) in enumerate(self.render_queue._queue):
-            if ctx.author.id == use_id:
+            if ctx.author.id == user_id:
                 return idx + 1
         return 1
 
@@ -132,15 +134,15 @@ class NzOsu(commands.Cog):
 
     @commands.cooldown(1, USER_COOLDOWN, commands.BucketType.user)
     @osu.command(name="render")
-    async def render(self, ctx):
-        attachment = (
-            ctx.message.attachments
-            or (
-                ctx.message.reference
-                and (await ctx.message.channel.fetch_message(ctx.message.reference.message_id)).attachments
-            )
-            or [None]
-        )[0]
+    async def render(self, ctx, attachment: discord.Attachment = None):
+        if attachment is None:
+            attachments = ctx.message.attachments
+
+            if not attachments and ctx.message.reference:
+                ref_msg = await ctx.message.channel.fetch_message(ctx.message.reference.message_id)
+                attachments = ref_msg.attachments
+
+            attachment = attachments[0] if attachments else None
         
         if not attachment:
             return await ctx.send("```Please attach a .osr replay file.```")
@@ -181,9 +183,9 @@ class NzOsu(commands.Cog):
             await ctx.send(f"```Link failed: {e}```")
 
     @osu.command(name="profile")
-    async def profile(self, ctx, memb: discord.Member | None = None, mod: str = 'osu'):
-        member = memb.id if memb is not None else ctx.author.id
-        mode = mod
+    async def profile(self, ctx, member: discord.Member | None = None, mode: str = 'osu'):
+        member = member.id if member is not None else ctx.author.id
+        mode = mode
 
         mode = mode.lower()
         if mode not in self.valid_modes:
@@ -225,9 +227,9 @@ class NzOsu(commands.Cog):
             await ctx.send(f"Error: {e}")
 
     @osu.command(name="top")
-    async def top(self, ctx, memb:discord.Member | None = None, mod: str = 'osu'):
-        member = memb.id if memb is not None else ctx.author.id
-        mode = mod
+    async def top(self, ctx, member:discord.Member | None = None, mode: str = 'osu'):
+        member = member.id if member is not None else ctx.author.id
+        mode = mode
 
         mode = mode.lower()
         if mode not in self.valid_modes:
@@ -270,9 +272,9 @@ class NzOsu(commands.Cog):
             await ctx.send(f"```Error: {e}```")
 
     @osu.command(name="recent_score", aliases=['rs'])
-    async def recent_score(self, ctx, memb: discord.Member | None = None, mod: str = 'osu'):
-        member = memb.id if memb is not None else ctx.author.id
-        mode = mod
+    async def recent_score(self, ctx, member: discord.Member | None = None, mode: str = 'osu'):
+        member = member.id if member is not None else ctx.author.id
+        mode = mode
 
         mode = mode.lower()
         if mode not in self.valid_modes:
@@ -309,8 +311,30 @@ class NzOsu(commands.Cog):
     async def skin_random(self, ctx):
         try:
             base_url = "https://skins.osuck.net/skins/"
-            skin_id = str(rand.randint(1, 4000))
+            skin_id = str(rand.randint(1, 9999))
+            attempt = 0
+            headers = {
+                "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/120.0.0.0 Safari/537.36"
+            }
+            async with aiohttp.ClientSession() as session:
+                while True:
+                    attempt += 1
+                    try:
+                        async with session.get(base_url + skin_id, headers=headers) as resp:
+                            if resp.status != 404:
+                                break
+                            else:
+                                skin_id = str(rand.randint(1, 9999))
+                    except aiohttp.ClientError() as e:
+                        print("attempt failed lol") 
+
+                    await asyncio.sleep(2) 
+
+            await ctx.send(f"```Your luck: {attempt} attempts```")
             await ctx.send(base_url + skin_id)
+            
         except Exception as e:
             await ctx.send(f"```I honestly have NO IDEA how this command failed\n{e}```")
 
